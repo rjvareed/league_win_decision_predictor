@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# collected data and trained models (large, and Riot data should not be redistributed in bulk)
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
