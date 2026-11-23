@@ -72,8 +72,9 @@ class Predictor:
 
     @torch.no_grad()
     def member_logits(self, champs: torch.Tensor, roles: torch.Tensor, feats=None, known=None,
-                      batch: int = 16384) -> torch.Tensor:
-        """Raw blue-win logits of every ensemble member: [n_models, n_drafts].
+                      batch: int = 16384, members: int | None = None) -> torch.Tensor:
+        """Raw blue-win logits of every ensemble member (or the first `members`):
+        [n_models, n_drafts].
         champs/roles are [n_drafts, 10] vocabulary / role indices, blue first. feats/known
         are optional player-history inputs (lolwp.data.PLAYER_FEATURES); without them the
         prediction is draft-only."""
@@ -88,7 +89,8 @@ class Predictor:
             return m(champs[part], roles[part], feats[part], known[part])
 
         return torch.stack([
-            torch.cat([run(m, i) for i in range(0, len(champs), batch)]) for m in self.models])
+            torch.cat([run(m, i) for i in range(0, len(champs), batch)])
+            for m in self.models[:members]])
 
     @torch.no_grad()
     def predict(self, blue: list, red: list, roles_known: bool = True,

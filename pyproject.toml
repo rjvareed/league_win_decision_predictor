@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lolwp"
 version = "0.1.0"
-description = "League of Legends win probability from the champion draft alone (Diamond+ solo queue, latest patch)"
+description = "League of Legends win probability before the game starts, and pick / ban advice for champion select (Diamond+ solo queue, latest patch)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -23,10 +23,14 @@ lolwp-collect = "lolwp.collect:main"
 lolwp-train = "lolwp.train:main"
 lolwp-predict = "lolwp.predict:main"
 lolwp-draft = "lolwp.draft:main"
+lolwp-app = "lolwp.app:main"
 lolwp-tune = "lolwp.tune:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+lolwp = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

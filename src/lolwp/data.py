@@ -101,6 +101,10 @@ class DraftData:
     clean_after: int | None  # ms; after this, every platform has had its first ladder snapshot
     clean: np.ndarray | None = None  # [N] bool: played after the first snapshot of its platform,
                                      # i.e. free of the ladder-snapshot selection bias
+    bans: np.ndarray | None = None   # [N, 10] int64 vocabulary indices of the banned champions;
+                                     # 0 = no ban, a whole row of -1 = bans not stored
+    result_means: np.ndarray | None = None  # [2, len(ADJUSTED)] typical loser / winner values
+                                            # behind the adjusted_* inputs (for lolwp.live)
 
     def __len__(self) -> int:
         return len(self.y)
@@ -302,8 +306,14 @@ def match_performance(ps: np.ndarray, ok: np.ndarray, duration: np.ndarray) -> n
 
 
 def stat_features(ps: np.ndarray, has: np.ndarray, ok: np.ndarray, duration: np.ndarray,
-                  pid: np.ndarray, champ: np.ndarray, blue_win: np.ndarray) -> np.ndarray:
+                  pid: np.ndarray, champ: np.ndarray, blue_win: np.ndarray,
+                  result_means: np.ndarray | None = None, return_means: bool = False):
     """[M, 10, len(STAT_FEATURES) + len(PREGAME_FEATURES)] for matches in time order.
+
+    result_means: optional [2, len(ADJUSTED)] typical loser / winner values to use for the
+    result-adjusted columns instead of running means over these matches (a handful of games
+    of one player says little about what winners typically show). With return_means the
+    means over all matches given here are returned as well, in that layout.
 
     ps: [M, 10, len(PSTAT_FIELDS)] raw per-player statistics (zeros where missing);
     has: [M] the match has statistics; ok: [M] roles known; pid: [M, 10] player index,
@@ -337,10 +347,15 @@ def stat_features(ps: np.ndarray, has: np.ndarray, ok: np.ndarray, duration: np.
     # what a winner / a loser showed on average in all *earlier* matches, removed from each
     # game before averaging (a running mean, so that no later game can influence it)
     adjusted = perf[:, [col(c) for c in ADJUSTED]].copy()
+    final_means = np.zeros((2, len(ADJUSTED)), dtype=np.float32)
     for result in (False, True):
         rows = valid & (won == result)
         per_match = (adjusted * rows[:, None]).reshape(m, 10, -1).sum(axis=1, dtype=np.float64)
         count = rows.reshape(m, 10).sum(axis=1)
+        final_means[int(result)] = per_match.sum(axis=0) / max(count.sum(), 1)
+        if result_means is not None:
+            adjusted -= np.asarray(result_means, dtype=np.float32)[int(result)] * (won == result)[:, None]
+            continue
         before = np.cumsum(per_match, axis=0) - per_match
         n_before = np.cumsum(count) - count
         mean = (before / np.maximum(n_before, 1)[:, None]).astype(np.float32)
@@ -366,7 +381,8 @@ def stat_features(ps: np.ndarray, has: np.ndarray, ok: np.ndarray, duration: np.
         np.stack([(spells == s).any(axis=-1) for s in SPELLS], axis=-1),
         np.stack([ps[:, :, I["keystone"]] == k for k in KEYSTONES], axis=-1),
     ], axis=-1).astype(np.float32) * has[:, None, None]
-    return np.concatenate([history.reshape(m, 10, -1), pregame], axis=-1).astype(np.float32)
+    out = np.concatenate([history.reshape(m, 10, -1), pregame], axis=-1).astype(np.float32)
+    return (out, final_means) if return_means else out
 
 
 def aux_targets(stats_json: str | None, duration: int) -> tuple[list[float], list[bool]]:
@@ -382,6 +398,88 @@ def aux_targets(stats_json: str | None, duration: int) -> tuple[list[float], lis
         (tb - tr) / 11 / 0.5,
         dur,
     ], [True, True, True, True]
+
+
+def featurize(rows, selected, frozen=None, result_means=None) -> dict:
+    """Turn match rows into model inputs.
+
+    rows: sequence of (blue, red, roles_ok, blue_win, patch, game_creation, duration,
+    blue_puuids, red_puuids, stats, pstats, ...) in time order, as stored in the matches table.
+    selected: [M] bool, the rows to return inputs for (all rows feed the player histories).
+    frozen: optional [M] bool, rows that must not feed the histories: hypothetical games
+    such as "this player on that champion right now" (lolwp.live).
+    result_means: see stat_features.
+    Returns arrays over the selected rows: raw [n, 10] champion ids, roles_ok, y, t,
+    feats [n, 10, F], known, aux, aux_mask; and result_means as measured on these rows."""
+    from .riot import PSTAT_FIELDS
+    m = len(rows)
+    selected = np.asarray(selected, dtype=bool)
+    frozen = np.zeros(m, dtype=bool) if frozen is None else np.asarray(frozen, dtype=bool)
+    n = int(selected.sum())
+    pid = np.full((m, 10), -1, dtype=np.int64)
+    champ_all = np.zeros((m, 10), dtype=np.int64)
+    ps = np.zeros((m, 10, len(PSTAT_FIELDS)), dtype=np.float32)
+    has_ps = np.zeros(m, dtype=bool)
+    player_index: dict[str, int] = {}
+    raw = np.empty((n, 10), dtype=np.int64)
+    roles_ok = np.empty(n, dtype=bool)
+    y = np.empty(n, dtype=np.float32)
+    t = np.empty(n, dtype=np.int64)
+    feats = np.zeros((n, 10, len(HISTORY_FEATURES)), dtype=np.float32)
+    known = np.zeros((n, 10), dtype=bool)
+    aux = np.zeros((n, len(AUX_TARGETS)), dtype=np.float32)
+    aux_mask = np.zeros((n, len(AUX_TARGETS)), dtype=bool)
+
+    history = PlayerHistory()
+    i = 0
+    for j, row in enumerate(rows):
+        blue, red, ok, win, _, created, duration, blue_ids, red_ids, stats, pstats = row[:11]
+        champions = [int(c) for c in blue.split(",")] + [int(c) for c in red.split(",")]
+        players = (blue_ids.split(",") + red_ids.split(",")) if blue_ids and red_ids else None
+        if players is not None and len(players) != 10:
+            players = None
+        champ_all[j] = champions
+        if players is not None:
+            # '' = a slot nobody is known in (hypothetical rows)
+            pid[j] = [player_index.setdefault(x, len(player_index)) if x else -1 for x in players]
+            if pstats and not frozen[j]:
+                try:
+                    ps[j] = json.loads(pstats)
+                    has_ps[j] = True
+                except ValueError:   # other shape than this version expects: treat as missing
+                    pass
+        if selected[j]:
+            raw[i] = champions
+            roles_ok[i], y[i], t[i] = bool(ok), win, created
+            aux[i], aux_mask[i] = aux_targets(stats, duration)
+        if players is not None:
+            if selected[j]:
+                for slot, (puuid, champion) in enumerate(zip(players, champions)):
+                    if not puuid:
+                        continue
+                    team = players[:5] if slot < 5 else players[5:]
+                    feats[i, slot] = history.features(
+                        puuid, champion, slot % 5 if ok else -1, created, team)
+                    known[i, slot] = True
+            if not frozen[j]:
+                values, mask = aux_targets(stats, duration)
+                for slot, (puuid, champion) in enumerate(zip(players, champions)):  # after reading!
+                    won = bool(win) if slot < 5 else not win
+                    sign = 1.0 if slot < 5 else -1.0
+                    history.update(puuid, champion, slot % 5 if ok else -1, won, created,
+                                   [sign * v for v in values[:3]] if mask[0] else None, values[3])
+                history.add_team(players[:5])
+                history.add_team(players[5:])
+        i += selected[j]
+
+    extra, means = stat_features(
+        ps, has_ps, np.array([bool(r[2]) for r in rows], dtype=bool),
+        np.array([r[6] for r in rows], dtype=np.float32), pid, champ_all,
+        np.array([bool(r[3]) for r in rows], dtype=bool), result_means, return_means=True)
+    del ps
+    feats = np.concatenate([feats, extra[selected]], axis=-1)
+    return dict(raw=raw, roles_ok=roles_ok, y=y, t=t, feats=feats, known=known, aux=aux,
+                aux_mask=aux_mask, result_means=means)
 
 
 def load_draft_data(
@@ -412,85 +510,33 @@ def load_draft_data(
         # Every stored match feeds the player histories, also those of patches not trained on.
         rows = conn.execute(
             "SELECT blue, red, roles_ok, blue_win, patch, game_creation, duration, "
-            "blue_puuids, red_puuids, stats, pstats, platform FROM matches "
+            "blue_puuids, red_puuids, stats, pstats, platform, bans FROM matches "
             "ORDER BY game_creation, match_id"
         ).fetchall()
     finally:
         conn.close()
 
     use = set(chosen)
-    n = sum(1 for r in rows if r[4] in use)
-    n_feat = len(HISTORY_FEATURES)
-    from .riot import PSTAT_FIELDS
-    m = len(rows)
-    selected_rows = np.zeros(m, dtype=bool)
-    pid = np.full((m, 10), -1, dtype=np.int64)
-    champ_all = np.zeros((m, 10), dtype=np.int64)
-    ps = np.zeros((m, 10, len(PSTAT_FIELDS)), dtype=np.float32)
-    has_ps = np.zeros(m, dtype=bool)
-    player_index: dict[str, int] = {}
-    raw = np.empty((n, 10), dtype=np.int64)
-    roles_ok = np.empty(n, dtype=bool)
-    y = np.empty(n, dtype=np.float32)
-    patch = np.empty(n, dtype=object)
-    t = np.empty(n, dtype=np.int64)
-    feats = np.zeros((n, 10, n_feat), dtype=np.float32)
-    known = np.zeros((n, 10), dtype=bool)
-    clean = np.zeros(n, dtype=bool)
-    aux = np.zeros((n, len(AUX_TARGETS)), dtype=np.float32)
-    aux_mask = np.zeros((n, len(AUX_TARGETS)), dtype=bool)
-
-    history = PlayerHistory()
-    i = 0
-    for j, (blue, red, ok, win, p, created, duration, blue_ids, red_ids, stats,
-            pstats, platform) in enumerate(rows):
-        champions = [int(c) for c in blue.split(",")] + [int(c) for c in red.split(",")]
-        players = (blue_ids.split(",") + red_ids.split(",")) if blue_ids and red_ids else None
-        if players is not None and len(players) != 10:
-            players = None
-        selected = p in use
-        selected_rows[j] = selected
-        champ_all[j] = champions
-        if players is not None:
-            pid[j] = [player_index.setdefault(x, len(player_index)) for x in players]
-            if pstats:
-                try:
-                    ps[j] = json.loads(pstats)
-                    has_ps[j] = True
-                except ValueError:   # other shape than this version expects: treat as missing
-                    pass
-        if selected:
-            raw[i] = champions
-            roles_ok[i], y[i], patch[i], t[i] = bool(ok), win, p, created
-            clean[i] = platform in seeds and created > seeds[platform]
-            aux[i], aux_mask[i] = aux_targets(stats, duration)
-        if players is not None:
-            if selected:
-                for slot, (puuid, champion) in enumerate(zip(players, champions)):
-                    team = players[:5] if slot < 5 else players[5:]
-                    feats[i, slot] = history.features(
-                        puuid, champion, slot % 5 if ok else -1, created, team)
-                    known[i, slot] = True
-            values, mask = aux_targets(stats, duration)
-            for slot, (puuid, champion) in enumerate(zip(players, champions)):  # after reading!
-                won = bool(win) if slot < 5 else not win
-                sign = 1.0 if slot < 5 else -1.0
-                history.update(puuid, champion, slot % 5 if ok else -1, won, created,
-                               [sign * v for v in values[:3]] if mask[0] else None, values[3])
-            history.add_team(players[:5])
-            history.add_team(players[5:])
-        i += selected
-
-    extra = stat_features(
-        ps, has_ps, np.array([bool(r[2]) for r in rows], dtype=bool),
-        np.array([r[6] for r in rows], dtype=np.float32), pid, champ_all,
-        np.array([bool(r[3]) for r in rows], dtype=bool))
-    del ps
-    feats = np.concatenate([feats, extra[selected_rows]], axis=-1)
+    selected = np.array([r[4] in use for r in rows], dtype=bool)
+    f = featurize(rows, selected)
+    raw, roles_ok, feats = f["raw"], f["roles_ok"], f["feats"]
+    n = len(raw)
+    chosen_rows = [r for r in rows if r[4] in use]
+    patch = np.array([r[4] for r in chosen_rows], dtype=object)
+    clean = np.array([r[11] in seeds and r[5] > seeds[r[11]] for r in chosen_rows], dtype=bool)
+    raw_bans = np.full((n, 10), -1, dtype=np.int64)
+    for i, r in enumerate(chosen_rows):
+        if r[12]:
+            b = [int(x) for x in r[12].split(",")]
+            if len(b) == 10:
+                raw_bans[i] = b
 
     champion_ids = sorted(set(np.unique(raw).tolist()) | {int(c) for c in extra_champion_ids})
     lookup = {c: i + 1 for i, c in enumerate(champion_ids)}
     champs = np.vectorize(lookup.__getitem__, otypes=[np.int64])(raw) if n else raw
+    # 0 = no ban / champion outside the vocabulary, -1 = bans not stored for this match
+    bans = np.vectorize(lambda c: lookup.get(c, 0), otypes=[np.int64])(raw_bans)
+    bans[(raw_bans < 0).all(axis=1)] = -1
 
     role_row = np.tile(np.arange(1, 6, dtype=np.int64), 2)
     roles = np.where(roles_ok[:, None], role_row[None, :], 0)
@@ -498,8 +544,9 @@ def load_draft_data(
     age = {p: i for i, p in enumerate(chosen)}  # 0 = newest patch
     weight = np.array([patch_decay ** age[p] for p in patch], dtype=np.float32)
 
-    return DraftData(champs, roles, y, weight, patch.astype(str), t, feats, known, aux, aux_mask,
-                     champion_ids, chosen, clean_after, clean)
+    return DraftData(champs, roles, f["y"], weight, patch.astype(str), f["t"], feats, f["known"],
+                     f["aux"], f["aux_mask"], champion_ids, chosen, clean_after, clean, bans,
+                     f["result_means"])
 
 
 def chronological_split(n: int, val_frac: float, test_frac: float):

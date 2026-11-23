@@ -6,7 +6,8 @@
 
 This is NOT League data: champions are "Champ001".. and outcomes are sampled from a made-up
 model with champion strengths, ally synergies, enemy counters, a blue-side bonus and - unless
-players=False - player skill and a bonus for playing one of your three main champions. It only
+players=False - player skill and a bonus for playing one of your three main champions.
+Strong champions are also banned more often (bans are drawn after the picks). It only
 shows that the pipeline runs end to end and can recover structure that exists.
 """
 
@@ -43,6 +44,11 @@ def make_synthetic(db_path, champions_path=None, n: int = 60_000, n_champions: i
     player_skill = prng.normal(0, skill, n_players)
     mains = np.stack([prng.choice(by_role[p % 5], 3, replace=False) for p in range(n_players)])
     players_by_role = [np.arange(n_players)[np.arange(n_players) % 5 == r] for r in range(5)]
+
+    # bans: strong champions are banned more often; a stream of its own, so that adding bans
+    # did not change the matches drawn for a given seed
+    brng = np.random.default_rng(seed + 2000)
+    ban_weight = np.exp(strength / max(effect, 1e-9))
 
     conn = db.connect(db_path)
     rows, truth = [], np.empty(n)
@@ -109,6 +115,8 @@ def make_synthetic(db_path, champions_path=None, n: int = 60_000, n_champions: i
             table[:, PSTAT["role_assignment"]] = prng.choice([1, 2, 3], 10, p=[0.7, 0.25, 0.05])
             table[:, PSTAT["lane_lead"]] = lead > 0
             pstats = json.dumps(table.tolist(), separators=(",", ":"))
+        free = np.setdiff1d(np.arange(v), picks)
+        bans = brng.choice(free, 10, replace=False, p=ban_weight[free] / ban_weight[free].sum())
         patch = "99.1" if i < 0.3 * n else "99.2"
         rows.append((f"SYN_{i}", "syn", f"{patch}.1.1", patch, 1_700_000_000_000 + i * 60_000,
                      int(1750 - 300 * abs(margin) + prng.normal(0, 200)),
@@ -116,7 +124,7 @@ def make_synthetic(db_path, champions_path=None, n: int = 60_000, n_champions: i
                      int(roles_ok), win, "DIAMOND",
                      ",".join(blue_ids) if players else None,
                      ",".join(red_ids) if players else None,
-                     ",".join(["-1"] * 10), stats, pstats))
+                     ",".join(str(c + 1) for c in bans), stats, pstats))
     conn.executemany(
         f"INSERT OR REPLACE INTO matches({COLUMNS}) VALUES({','.join('?' * 16)})", rows)
     conn.close()

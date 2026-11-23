@@ -15,9 +15,12 @@ Training recipe per ensemble member
   2. Pretrain on all selected patches (older ones down-weighted by --patch-decay).
   3. Fine-tune on the newest patch only at a lower learning rate; kept only if the validation
      loss improves (--no-finetune to disable).
+  4. Refit: a fresh model is trained on training + validation games for the epoch counts
+     found in 2 and 3, and that one is saved (--no-refit to disable).
 Inputs are the draft and, when the database has player ids, each player's history before the
-game (see lolwp.data.PLAYER_FEATURES). Player inputs are randomly hidden during training, so
-the same model also predicts from the draft alone. End-of-game margins (gold, kills, towers,
+game (see lolwp.data.PLAYER_FEATURES). Player inputs are randomly hidden during training (for
+everyone, or for a random part of the ten), so the same model also predicts from the draft
+alone and from the draft plus a single known player. End-of-game margins (gold, kills, towers,
 length) are extra training targets only (--aux-weight 0 to disable).
 """
 
@@ -50,14 +53,16 @@ from .model import DraftModel
 
 # Chosen by lolwp-tune on 513k real Diamond+ games (patches 16.19-16.22) with player
 # histories and per-player statistics. On draft-only data (no player ids) a smaller model
-# with --lr-offset did better.
+# with --lr-offset did better. The masking shares, the longer schedule and the refit were
+# compared afterwards on 511k games (16.21-16.23), see "Results" in the README.
 DEFAULT_HP = {
     "d_model": 32, "layers": 2, "heads": 4, "d_ff": 64, "dropout": 0.1,
     "antisymmetric": True, "lr_offset": False,
     "lr": 0.0003, "weight_decay": 0.2, "batch_size": 512,
-    "role_dropout": 0.15, "player_dropout": 0.35, "aux_weight": 1.0,
-    "epochs": 40, "patience": 5,
+    "role_dropout": 0.15, "player_dropout": 0.2, "player_partial": 0.2, "aux_weight": 1.0,
+    "epochs": 60, "patience": 7,
     "finetune": True, "finetune_lr_mult": 0.1, "finetune_epochs": 12,
+    "refit": True,
 }
 MIN_FINETUNE_ROWS = 5000
 
@@ -166,14 +171,19 @@ def make_model(bundle: Bundle, hp: dict) -> DraftModel:
 
 @torch.no_grad()
 def predict_logits(model, bundle: Bundle, rows: torch.Tensor, players: bool = True,
-                   roles: bool = True, batch: int = 8192) -> torch.Tensor:
+                   roles: bool = True, batch: int = 8192, solo: bool = False) -> torch.Tensor:
+    """solo: only one player per game is known (the same one on every call), the situation
+    of someone using the model for their own champion select."""
     model.eval()
     out = []
     for i in range(0, len(rows), batch):
         r = rows[i:i + batch]
         role_in = bundle.roles[r] if roles else torch.zeros_like(bundle.roles[r])
         if players and model.player is not None:
-            out.append(model(bundle.champs[r], role_in, bundle.feats[r], bundle.known[r]))
+            known = bundle.known[r]
+            if solo:
+                known = known & (torch.arange(10, device=r.device)[None, :] == (r % 10)[:, None])
+            out.append(model(bundle.champs[r], role_in, bundle.feats[r], known))
         else:
             out.append(model(bundle.champs[r], role_in))
     return torch.cat(out) if out else torch.zeros(0, device=bundle.device)
@@ -181,10 +191,14 @@ def predict_logits(model, bundle: Bundle, rows: torch.Tensor, players: bool = Tr
 
 def fit(model, bundle: Bundle, rows: torch.Tensor, val: torch.Tensor, hp: dict, *, lr: float,
         epochs: int, patience: int, seed: int, weighted: bool = True,
-        keep_current: bool = False, log=print) -> tuple[float, int]:
+        keep_current: bool = False, stop_after: int | None = None, log=print
+        ) -> tuple[float, int]:
     """AdamW + warmup/cosine schedule; early-stop on validation log loss.
 
     keep_current: treat the model's present weights as the result to beat (fine-tuning).
+    stop_after: no early stopping; follow the schedule of an `epochs`-long run for exactly
+    this many epochs and keep the final weights (refitting with the validation games, when
+    there is nothing left to select on).
     Returns (best validation log loss, best epoch; 0 = the starting weights were kept)."""
     device = bundle.device
     gen = torch.Generator(device=device).manual_seed(seed)
@@ -213,7 +227,7 @@ def fit(model, bundle: Bundle, rows: torch.Tensor, val: torch.Tensor, hp: dict, 
         best_loss, best_state = val_loss(), copy.deepcopy(model.state_dict())
     use_players = model.player is not None
     use_aux = hp["aux_weight"] > 0
-    for epoch in range(1, epochs + 1):
+    for epoch in range(1, (stop_after or epochs) + 1):
         model.train()
         perm = rows[torch.randperm(n, device=device, generator=gen)]
         running, seen = 0.0, 0.0
@@ -225,8 +239,17 @@ def fit(model, bundle: Bundle, rows: torch.Tensor, val: torch.Tensor, hp: dict, 
                 r = r.masked_fill(drop[:, None], 0)
             feats = known = None
             if use_players:  # cope with games where nothing is known about the players
-                drop = torch.rand(len(idx), device=device, generator=gen) < hp["player_dropout"]
+                u = torch.rand(len(idx), device=device, generator=gen)
+                drop = u < hp["player_dropout"]
                 feats, known = bundle.feats[idx], bundle.known[idx] & ~drop[:, None]
+                if hp["player_partial"] > 0:
+                    # ... and with games where only some of the ten are known, down to a
+                    # single one (champion select: you know yourself, nobody else)
+                    partial = (u >= hp["player_dropout"]) & (
+                        u < hp["player_dropout"] + hp["player_partial"])
+                    n_keep = torch.randint(1, 10, (len(idx), 1), device=device, generator=gen)
+                    rank = torch.rand(len(idx), 10, device=device, generator=gen).argsort(dim=1).argsort(dim=1)
+                    known = known & ((rank < n_keep) | ~partial[:, None])
             logits, aux = model(bundle.champs[idx], r, feats, known, return_aux=True)
             wi = bundle.w[idx] if weighted else torch.ones(len(idx), device=device)
             bce = (F.binary_cross_entropy_with_logits(logits, bundle.y[idx], reduction="none")
@@ -243,6 +266,9 @@ def fit(model, bundle: Bundle, rows: torch.Tensor, val: torch.Tensor, hp: dict, 
             sched.step()
             running += bce.item() * wi.sum().item()
             seen += wi.sum().item()
+        if stop_after:
+            log(f"  epoch {epoch:3d}  train {running / seen:.5f}")
+            continue
         current = val_loss()
         log(f"  epoch {epoch:3d}  train {running / seen:.5f}  val {current:.5f}")
         if current < best_loss - 1e-6:
@@ -252,6 +278,8 @@ def fit(model, bundle: Bundle, rows: torch.Tensor, val: torch.Tensor, hp: dict, 
             bad += 1
             if bad >= patience:
                 break
+    if stop_after:
+        return float("nan"), stop_after
     model.load_state_dict(best_state)
     return best_loss, best_epoch
 
@@ -272,6 +300,29 @@ def train_member(bundle: Bundle, hp: dict, seed: int, log=print):
                           patience=3, seed=seed + 1000, weighted=False, keep_current=True, log=log)
         info.update(val_loss=loss, finetune_epoch=epoch)
     return model, info
+
+
+def refit_member(bundle: Bundle, hp: dict, seed: int, info: dict, log=print):
+    """Train a fresh model on the training *and* validation games, for as many epochs as
+    `train_member` found best with this seed (`info`).
+
+    The validation games are the newest ones before the test period, and the ones whose
+    player histories look most like those of future games (the crawl has had time to see
+    each player often), so leaving them out of the final model costs accuracy. Nothing is
+    selected on them here: the schedule and the stopping points come from the first run."""
+    torch.manual_seed(seed)
+    model = make_model(bundle, hp)
+    both = np.concatenate([bundle.tr, bundle.va])
+    va = bundle.rows(bundle.va)
+    if info["pretrain_epoch"]:
+        fit(model, bundle, bundle.rows(both), va, hp, lr=hp["lr"], epochs=hp["epochs"],
+            patience=0, seed=seed, stop_after=info["pretrain_epoch"], log=log)
+    if info["finetune_epoch"]:
+        newest = both[bundle.data.patch[both] == bundle.data.patches[0]]
+        fit(model, bundle, bundle.rows(newest), va, hp, lr=hp["lr"] * hp["finetune_lr_mult"],
+            epochs=hp["finetune_epochs"], patience=0, seed=seed + 1000, weighted=False,
+            stop_after=info["finetune_epoch"], log=log)
+    return model
 
 
 def fit_calibration(logits: np.ndarray, y: np.ndarray) -> tuple[float, float]:
@@ -338,13 +389,19 @@ def add_hp_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--weight-decay", type=float)
     g.add_argument("--batch-size", type=int)
     g.add_argument("--role-dropout", type=float)
-    g.add_argument("--player-dropout", type=float)
+    g.add_argument("--player-dropout", type=float,
+                   help="share of training games shown without any player inputs")
+    g.add_argument("--player-partial", type=float,
+                   help="share of training games shown with only 1-9 random players known")
     g.add_argument("--aux-weight", type=float,
                    help="weight of the end-of-game margin targets (0 = off)")
     g.add_argument("--epochs", type=int)
     g.add_argument("--patience", type=int)
     g.add_argument("--finetune", action=flag, default=None,
                    help="fine-tune on the newest patch after pretraining on all")
+    g.add_argument("--refit", action=flag, default=None,
+                   help="retrain every member on training + validation games for the number "
+                        "of epochs early stopping chose, and save that model")
     g.add_argument("--finetune-lr-mult", type=float)
     g.add_argument("--finetune-epochs", type=int)
 
@@ -403,6 +460,7 @@ def run(argv=None) -> dict:
     modes = {"draft": dict(players=False), "noroles": dict(players=False, roles=False)}
     if b.has_players:
         modes["players"] = dict(players=True)
+        modes["solo"] = dict(players=True, solo=True)
     states, infos = [], []
     val_logits = {m: [] for m in modes}
     ev_logits = {m: [] for m in modes}
@@ -411,10 +469,17 @@ def run(argv=None) -> dict:
         print(f"model {k + 1}/{args.ensemble}")
         model, info = train_member(b, hp, args.seed + k)
         infos.append(info)
-        states.append({n: t.cpu() for n, t in model.state_dict().items()})
+        final = model
+        if hp["refit"]:
+            print("  refitting on training + validation games")
+            final = refit_member(b, hp, args.seed + k, info)
+        states.append({n: t.cpu() for n, t in final.state_dict().items()})
+        # Calibration always comes from the model that never saw the validation games; the
+        # report uses the saved model, unless it would be scored on games it was trained on.
+        scored = final if len(b.te) else model
         for m, kw in modes.items():
             val_logits[m].append(predict_logits(model, b, va_t, **kw).cpu().numpy())
-            ev_logits[m].append(predict_logits(model, b, ev_t, **kw).cpu().numpy())
+            ev_logits[m].append(predict_logits(scored, b, ev_t, **kw).cpu().numpy())
     print(f"training took {time.time() - t0:.0f}s")
 
     def calibrated(mode: str, calibrate_on: str):
@@ -426,8 +491,10 @@ def run(argv=None) -> dict:
         y[ev], sigmoid(ev_logits["draft"][0]))
     report["transformer ensemble, draft"] = summarize(y[ev], p_draft)
     report["  same, roles hidden"] = summarize(y[ev], calibrated("noroles", "draft")[0])
-    p_best, cal_players = p_draft, None
+    p_best, cal_players, cal_solo = p_draft, None, None
     if b.has_players:
+        p_solo, cal_solo = calibrated("solo", "solo")
+        report["transformer ensemble, draft + one known player"] = summarize(y[ev], p_solo)
         p_best, cal_players = calibrated("players", "players")
         report["transformer ensemble, draft + players"] = summarize(y[ev], p_best)
         late = data.clean[ev] if data.clean is not None else np.zeros(len(ev), dtype=bool)
@@ -463,6 +530,17 @@ def run(argv=None) -> dict:
     role_games = np.zeros((n_champ + 1, 5), dtype=np.int64)
     has_role = data.roles[b.tr] > 0
     np.add.at(role_games, (data.champs[b.tr][has_role], data.roles[b.tr][has_role] - 1), 1)
+    # how often each champion was banned (lolwp-draft corrects pick shares for availability)
+    ban_games, n_ban_games = np.zeros(n_champ + 1, dtype=np.int64), 0
+    if data.bans is not None:
+        stored = data.bans[b.tr]
+        stored = stored[stored[:, 0] >= 0]
+        n_ban_games = len(stored)
+        unique = np.sort(stored, axis=1)           # count a champion once per game even if
+                                                   # both teams banned it
+        first = np.ones_like(unique, dtype=bool)
+        first[:, 1:] = unique[:, 1:] != unique[:, :-1]
+        np.add.at(ban_games, unique[first], 1)
     names = b.names
     checkpoint = {
         "format": 2,
@@ -471,12 +549,17 @@ def run(argv=None) -> dict:
         "calibration": {"scale": cal_draft[0], "bias": cal_draft[1]},
         "calibration_players": (
             {"scale": cal_players[0], "bias": cal_players[1]} if cal_players else None),
+        "calibration_solo": (
+            {"scale": cal_solo[0], "bias": cal_solo[1]} if cal_solo else None),
         "player_features": list(PLAYER_FEATURES) if b.has_players else [],
         "champion_ids": data.champion_ids,
         "champion_names": {int(c): names[c]["name"] for c in data.champion_ids if c in names},
         "champion_keys": {int(c): names[c]["id"] for c in data.champion_ids if c in names},
         "champion_train_games": counts.tolist(),
         "champion_role_games": role_games[1:].tolist(),
+        "champion_ban_games": ban_games[1:].tolist(),
+        "result_means": (data.result_means.tolist() if data.result_means is not None else None),
+        "ban_games": n_ban_games,
         "patches": data.patches,
         "n_matches": {"train": len(b.tr), "val": len(b.va), "test": len(b.te)},
         "evaluated_on": ev_name,
@@ -492,7 +575,8 @@ def run(argv=None) -> dict:
     torch.save(checkpoint, out)
     summary = {k: v for k, v in checkpoint.items()
                if k not in ("state_dicts", "champion_names", "champion_keys",
-                            "champion_ids", "champion_train_games", "champion_role_games")}
+                            "champion_ids", "champion_train_games", "champion_role_games",
+                            "champion_ban_games")}
     out.with_suffix(".metrics.json").write_text(json.dumps(summary, indent=1))
     print(f"\nsaved {out} and {out.with_suffix('.metrics.json')}")
     return summary

@@ -117,3 +117,34 @@ def test_bans_target_strong_enemy_champions(advisor):
     assert bans[0].champion not in {b.champion for b in advisor.recommend_bans("blue", banned=already, top=100)}
     by_net = advisor.recommend_bans("blue", top=100, sort="net")
     assert [b.net for b in by_net] == sorted((b.net for b in by_net), reverse=True)
+
+
+def test_ban_rates_and_availability_adjusted_pick_shares(advisor):
+    """Champions that are banned a lot are picked more often when they do get through."""
+    assert advisor.ban_rate[0] == 0 and 0 < advisor.ban_rate[1:].min() < advisor.ban_rate.max() < 1
+    assert advisor.open_share.sum(axis=0) == pytest.approx(np.ones(5))
+    most, least = int(np.argmax(advisor.ban_rate)), int(np.argmin(advisor.ban_rate[1:])) + 1
+    role = lambda c: int(np.argmax(advisor.role_games[c]))  # noqa: E731
+    assert advisor.open_share[most, role(most)] > advisor.role_share[most, role(most)]
+    assert advisor.open_share[least, role(least)] < advisor.role_share[least, role(least)]
+    # raw shares while the bans are unknown, shares given availability once they are in
+    assert advisor.share(set()) is advisor.role_share
+    assert advisor.share(set(range(1, 11))) is advisor.open_share
+    strength = np.random.default_rng(1).normal(0, 0.25, 60)
+    assert np.corrcoef(advisor.ban_rate[1:], strength)[0, 1] > 0.5
+    bans = advisor.recommend_bans("blue", top=3)
+    assert all(b.ban_rate == advisor.ban_rate[advisor.index(b.champion)] for b in bans)
+    fast = advisor.recommend_bans("blue", top=100, with_net=False)
+    assert all(b.net == b.gain for b in fast)
+    assert [b.champion for b in fast] == [b.champion for b in advisor.recommend_bans("blue", top=100)]
+
+
+def test_evaluate_matches_the_model_on_a_finished_draft(advisor):
+    mine = ["Champ001", "Champ002", "Champ003", "Champ004", "Champ005"]
+    theirs = ["Champ006", "Champ007", "Champ008", "Champ009", "Champ010"]
+    ally = {r: advisor.index(c) for r, c in enumerate(mine)}
+    enemy = {r: advisor.index(c) for r, c in enumerate(theirs)}
+    win, spread = advisor.evaluate("red", ally, enemy)
+    assert win == pytest.approx(1 - advisor.p.predict(theirs, mine), abs=1e-5) and spread >= 0
+    open_win, _ = advisor.evaluate("blue", {}, {})
+    assert 0.3 < open_win < 0.7

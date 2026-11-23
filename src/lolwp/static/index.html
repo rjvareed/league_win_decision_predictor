@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Champion select assistant</title>
+<style>
+:root {
+  --bg: #10141b; --panel: #181e28; --panel2: #1f2733; --line: #2c3645; --text: #e6e9ee;
+  --muted: #8d98a8; --blue: #4c9bf5; --red: #f0625d; --good: #4fc98a; --bad: #f0625d;
+  --accent: #e2b34a; --focus: #e2b34a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+.wrap { max-width: 1500px; margin: 0 auto; padding: 12px 16px 40px; }
+header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-bottom: 12px; }
+header h1 { font-size: 17px; margin: 0 8px 0 0; font-weight: 650; }
+.field { display: flex; align-items: center; gap: 6px; }
+.field > span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { background: var(--panel); border: 0; padding: 5px 11px; border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--panel2); box-shadow: inset 0 -2px 0 var(--accent); font-weight: 600; }
+.seg button.on.blue { box-shadow: inset 0 -2px 0 var(--blue); }
+.seg button.on.red { box-shadow: inset 0 -2px 0 var(--red); }
+input[type=text], select { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; }
+input[type=text]:focus, select:focus, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.btn { background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 11px; }
+.btn:hover { border-color: var(--muted); }
+.btn[disabled] { opacity: .5; cursor: default; }
+.meta { margin-left: auto; color: var(--muted); font-size: 12px; text-align: right; }
+
+.board { display: grid; grid-template-columns: 280px minmax(0, 1fr) 280px; gap: 12px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.team.mine h2 { color: var(--mine); } .team.theirs h2 { color: var(--theirs); }
+.slot { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin-bottom: 6px; min-height: 52px; position: relative; }
+.slot:hover { border-color: var(--muted); }
+.slot.active { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.slot .role { width: 48px; flex: none; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.slot .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot .who.empty { color: var(--muted); }
+.slot .tag { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: var(--accent); color: #1b1503; font-weight: 700; }
+.slot .tag.q { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.slot .x { color: var(--muted); border: 0; background: none; padding: 2px 5px; font-size: 15px; line-height: 1; }
+.slot .x:hover { color: var(--text); }
+.icon { width: 38px; height: 38px; border-radius: 6px; background: #0c0f14 center/cover no-repeat; flex: none;
+  display: grid; place-items: center; font-size: 11px; color: var(--muted); overflow: hidden; }
+.icon.sm { width: 26px; height: 26px; border-radius: 5px; font-size: 9px; }
+.icon img { width: 100%; height: 100%; display: block; }
+.hint { color: var(--muted); font-size: 12px; margin: 6px 2px 0; }
+
+.bans { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+.bans .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin-right: 4px; }
+.ban { width: 40px; height: 40px; padding: 0; border-radius: 7px; border: 1px dashed var(--line); background: var(--panel2);
+  display: grid; place-items: center; color: var(--muted); position: relative; overflow: hidden; }
+.ban.filled { border-style: solid; }
+.ban.filled::after { content: ""; position: absolute; inset: 0; background: linear-gradient(to top right, transparent 46%, var(--bad) 46%, var(--bad) 54%, transparent 54%); opacity: .8; }
+.ban.active { border-color: var(--focus); border-style: solid; box-shadow: 0 0 0 1px var(--focus); }
+.ban .icon { width: 100%; height: 100%; border-radius: 0; }
+
+.gridbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.gridbar input { flex: 1; min-width: 140px; }
+.target { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.target b { color: var(--text); font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); gap: 6px; max-height: 372px; overflow-y: auto; padding: 2px; }
+.champ { background: none; border: 1px solid transparent; border-radius: 7px; padding: 4px 2px 3px; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.champ:hover { border-color: var(--muted); background: var(--panel2); }
+.champ .icon { width: 46px; height: 46px; }
+.champ span { font-size: 10.5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.champ.off { opacity: .25; }
+.champ.inpool { border-color: var(--accent); }
+
+.verdict { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 12px 0 10px; }
+.verdict .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.verdict .sub { color: var(--muted); font-size: 13px; }
+.bar { height: 6px; border-radius: 3px; background: var(--theirs); overflow: hidden; margin-bottom: 12px; }
+.bar i { display: block; height: 100%; background: var(--mine); transition: width .2s; }
+.recs { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+td { padding: 4px 6px; text-align: right; border-bottom: 1px solid #222a36; white-space: nowrap; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--panel2); }
+tbody tr.cur { background: #2a2616; }
+td .cell { display: flex; align-items: center; gap: 8px; }
+td.reply { color: var(--muted); font-size: 12px; text-align: left; white-space: normal; }
+.pos { color: var(--good); } .neg { color: var(--bad); } .dim { color: var(--muted); }
+.note { color: var(--muted); font-size: 12px; margin: 8px 2px 0; }
+.err { color: var(--bad); font-size: 13px; margin: 6px 0; min-height: 1em; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.player { margin-top: 10px; }
+.player .who { font-weight: 600; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px 2px 2px; font-size: 12px; }
+label.check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+@media (max-width: 1050px) { .board { grid-template-columns: 1fr 1fr; } .board .center { grid-column: 1 / -1; order: 3; } .recs { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .board { grid-template-columns: 1fr; } .meta { margin-left: 0; text-align: left; } td.reply, th.reply { display: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Champion select assistant</h1>
+    <div class="field"><span>Your side</span>
+      <div class="seg" id="side"><button data-v="blue" class="blue">Blue</button><button data-v="red" class="red">Red</button></div></div>
+    <div class="field"><span>Your role</span><div class="seg" id="role"></div></div>
+    <button class="btn" id="reset" title="Clear all picks and bans">New draft</button>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div class="board">
+    <section class="panel team mine" id="allyPanel">
+      <h2>Your team</h2>
+      <div id="ally"></div>
+      <div class="player">
+        <h2 style="margin-top:12px">Your match history</h2>
+        <div id="lookup">
+          <div class="row">
+            <input type="text" id="riotId" placeholder="Name#TAG" style="flex:1;min-width:0" autocomplete="off" spellcheck="false">
+            <select id="platform" title="Server"></select>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <button class="btn" id="load">Load my games</button>
+            <button class="btn" id="unload" hidden>Forget</button>
+          </div>
+        </div>
+        <div class="err" id="playerErr"></div>
+        <div id="playerInfo" class="hint"></div>
+      </div>
+    </section>
+
+    <section class="panel center">
+      <div class="bans" id="bans"></div>
+      <div class="target" id="target"></div>
+      <div class="gridbar">
+        <input type="text" id="search" placeholder="Search champion…" autocomplete="off" spellcheck="false">
+        <div class="seg" id="filter"></div>
+        <button class="btn" id="editPool" title="Choose the champions you play">Edit my pool</button>
+      </div>
+      <div class="grid" id="grid"></div>
+    </section>
+
+    <section class="panel team theirs" id="enemyPanel">
+      <h2>Enemy team</h2>
+      <div id="enemy"></div>
+      <button class="btn" id="enemyAuto" style="width:100%">+ Enemy pick (role guessed)</button>
+      <p class="hint">Roles marked <b>?</b> are guessed from how the champion is usually played. To correct one, click the right role row, then the champion.</p>
+    </section>
+  </div>
+
+  <div class="verdict"><span class="big" id="win">–</span><span class="sub" id="winSub">Loading model…</span></div>
+  <div class="bar"><i id="winBar" style="width:50%"></i></div>
+  <div class="err" id="err"></div>
+
+  <div class="recs">
+    <section class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:6px">
+        <h2 style="margin:0" id="pickTitle">Best picks</h2>
+        <label class="check"><input type="checkbox" id="usePool"> Only my pool (<span id="poolCount">0</span>)</label>
+      </div>
+      <table><thead id="pickHead"></thead><tbody id="picks"></tbody></table>
+      <p class="note" id="pickNote"></p>
+    </section>
+    <section class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:6px">
+        <h2 style="margin:0">Best bans</h2>
+        <div class="seg" id="banSort"><button data-v="gain" title="Hurts the enemy most">Deny enemy</button><button data-v="net" title="Hurts the enemy more than your own team">Net of own loss</button></div>
+      </div>
+      <table><thead><tr><th>Champion</th><th title="Chance an enemy picks it if you do not ban it">Enemy picks</th><th title="Your win chance when an enemy has it">Win % if so</th><th title="Win-rate points gained by banning it">Gain</th><th title="How often it is banned anyway">Banned</th></tr></thead><tbody id="banRecs"></tbody></table>
+      <p class="note" id="banNote"></p>
+    </section>
+  </div>
+  <p class="note">Win chances come from a model trained on Diamond+ ranked solo games. The draft moves the win chance by a few points at most, and gaps smaller than the ± column are noise: use this to break ties between champions you already play well, not to pick something unfamiliar. Not endorsed by Riot Games.</p>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const ROLE_LABEL = ["Top", "Jungle", "Mid", "Bot", "Support"];
+let META = null, BY_ID = {};
+const LOADED = new Set();   // icon URLs the browser has already fetched
+let last = null, pending = 0, timer = null;
+
+const saved = (() => { try { return JSON.parse(localStorage.getItem("lolwp") || "{}"); } catch (e) { return {}; } })();
+const S = {
+  side: saved.side || "blue", role: saved.role ?? 2,
+  ally: [0, 0, 0, 0, 0],
+  enemy: [],                 // [{id, role: 0..4 | null}]
+  bans: Array(10).fill(0),
+  target: { kind: "ban", i: 0 },   // ban i | ally i | enemy i | enemyAuto | pool
+  pool: saved.pool || [], usePool: !!saved.usePool,
+  filter: -1, search: "", sort: "gain",
+  player: null, riotId: saved.riotId || "", platform: saved.platform || "euw1",
+};
+function persist() {
+  try { localStorage.setItem("lolwp", JSON.stringify({ side: S.side, role: S.role, pool: S.pool, usePool: S.usePool, riotId: S.riotId, platform: S.platform })); } catch (e) { /* private mode */ }
+}
+
+function el(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") n.className = v; else if (k === "text") n.textContent = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else if (v !== false && v != null) n.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) n.append(kid);
+  return n;
+}
+function icon(id, small) {
+  const c = BY_ID[id], box = el("span", { class: "icon" + (small ? " sm" : "") });
+  if (!c) return box;
+  box.textContent = c.name.slice(0, 3);
+  if (META.ddragon && c.key) {
+    const src = `https://ddragon.leagueoflegends.com/cdn/${META.ddragon}/img/champion/${c.key}.png`;
+    const img = el("img", { alt: "", src });
+    if (LOADED.has(src)) { box.textContent = ""; box.append(img); }   // no flicker on re-render
+    else img.addEventListener("load", () => { LOADED.add(src); box.textContent = ""; box.append(img); });
+  }
+  return box;
+}
+const pct = (x, d = 1) => (100 * x).toFixed(d) + "%";
+const signed = (x, d = 1) => (x >= 0 ? "+" : "−") + Math.abs(100 * x).toFixed(d);
+
+// ---- state changes ---------------------------------------------------------------------
+function taken() {
+  const t = new Set(S.bans.filter(Boolean));
+  S.ally.filter(Boolean).forEach(c => t.add(c));
+  S.enemy.forEach(e => t.add(e.id));
+  return t;
+}
+function removeEverywhere(id) {
+  S.ally = S.ally.map(c => (c === id ? 0 : c));
+  S.enemy = S.enemy.filter(e => e.id !== id);
+  S.bans = S.bans.map(c => (c === id ? 0 : c));
+}
+function enemyRows() {       // role -> {id, guessed}
+  const rows = Array(5).fill(null);
+  S.enemy.forEach(e => { if (e.role != null) rows[e.role] = { id: e.id, guessed: false }; });
+  const loose = S.enemy.filter(e => e.role == null);
+  if (last && last.enemy) {
+    for (const [r, id] of Object.entries(last.enemy)) {
+      const k = loose.findIndex(e => e.id === id);
+      if (k >= 0 && !rows[r]) { rows[r] = { id, guessed: true }; loose.splice(k, 1); }
+    }
+  }
+  loose.forEach(e => { const r = rows.findIndex(x => !x); if (r >= 0) rows[r] = { id: e.id, guessed: true }; });
+  return rows;
+}
+function place(id) {
+  const t = S.target;
+  if (t.kind === "pool") {
+    S.pool = S.pool.includes(id) ? S.pool.filter(c => c !== id) : S.pool.concat(id);
+    persist(); render(); refresh(); return;
+  }
+  removeEverywhere(id);
+  if (t.kind === "ban") {
+    S.bans[t.i] = id;
+    const next = S.bans.findIndex(c => !c);
+    setTarget(next >= 0 ? { kind: "ban", i: next } : { kind: "ally", i: S.role });
+  } else if (t.kind === "ally") {
+    S.ally[t.i] = id;
+  } else if (t.kind === "enemy") {
+    S.enemy = S.enemy.filter(e => e.role !== t.i);
+    const shown = enemyRows()[t.i];          // a guessed champion sitting in that row keeps its guess
+    if (shown && shown.guessed) { /* it will be re-placed by the next guess */ }
+    S.enemy.push({ id, role: t.i });
+    setTarget({ kind: "enemyAuto" });
+  } else if (t.kind === "enemyAuto") {
+    if (S.enemy.length >= 5) { flash("The enemy team already has five champions"); return; }
+    S.enemy.push({ id, role: null });
+  }
+  render(); refresh();
+}
+function clearSlot(kind, i) {
+  if (kind === "ally") S.ally[i] = 0;
+  else if (kind === "ban") S.bans[i] = 0;
+  else { const row = enemyRows()[i]; if (row) S.enemy = S.enemy.filter(e => e.id !== row.id); }
+  setTarget({ kind, i });
+  render(); refresh();
+}
+function flash(msg) { $("err").textContent = msg; }
+function setTarget(t) {      // the grid follows the slot being filled: its role, or everything
+  S.target = t;
+  S.filter = (t.kind === "ally" || t.kind === "enemy") ? t.i : -1;
+}
+
+// ---- rendering -------------------------------------------------------------------------
+function seg(root, options, value, onPick) {
+  root.replaceChildren(...options.map(([v, label, cls]) =>
+    el("button", { class: (cls || "") + (v === value ? " on" : ""), text: label, type: "button", onclick: () => onPick(v) })));
+}
+function slot(kind, i, id, opts) {
+  const active = S.target.kind === kind && S.target.i === i;
+  const c = BY_ID[id];
+  const node = el("div", { class: "slot" + (active ? " active" : ""), role: "button", tabindex: 0,
+    "aria-label": `${kind === "ally" ? "Your" : "Enemy"} ${ROLE_LABEL[i]}${c ? ": " + c.name : ", empty"}`,
+    onclick: () => { setTarget({ kind, i }); render(); },
+    onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setTarget({ kind, i }); render(); } } },
+    el("span", { class: "role", text: ROLE_LABEL[i] }), icon(id),
+    el("span", { class: "who" + (c ? "" : " empty"), text: c ? c.name : "—" }));
+  if (opts.you) node.append(el("span", { class: "tag", text: "YOU" }));
+  if (opts.guessed) node.append(el("span", { class: "tag q", text: "?", title: "Role guessed" }));
+  if (c) node.append(el("button", { class: "x", type: "button", title: "Clear", "aria-label": "Clear " + c.name, text: "×",
+    onclick: e => { e.stopPropagation(); clearSlot(kind, i); } }));
+  return node;
+}
+function render() {
+  const mine = S.side === "blue" ? "var(--blue)" : "var(--red)", theirs = S.side === "blue" ? "var(--red)" : "var(--blue)";
+  document.documentElement.style.setProperty("--mine", mine);
+  document.documentElement.style.setProperty("--theirs", theirs);
+  seg($("side"), [["blue", "Blue", "blue"], ["red", "Red", "red"]], S.side, v => { S.side = v; persist(); render(); refresh(); });
+  seg($("role"), ROLE_LABEL.map((l, i) => [i, l]), S.role, v => { S.role = v; if (S.target.kind === "ally") setTarget({ kind: "ally", i: v }); persist(); render(); refresh(); });
+  seg($("banSort"), [["gain", "Deny enemy"], ["net", "Net of own loss"]], S.sort, v => { S.sort = v; render(); refresh(); });
+
+  $("ally").replaceChildren(...S.ally.map((id, i) => slot("ally", i, id, { you: i === S.role })));
+  const rows = enemyRows();
+  $("enemy").replaceChildren(...rows.map((r, i) => slot("enemy", i, r ? r.id : 0, { guessed: r && r.guessed })));
+  $("enemyAuto").style.borderColor = S.target.kind === "enemyAuto" ? "var(--focus)" : "";
+
+  $("bans").replaceChildren(el("span", { class: "label", text: "Bans" }), ...S.bans.map((id, i) => {
+    const active = S.target.kind === "ban" && S.target.i === i;
+    const b = el("button", { class: "ban" + (id ? " filled" : "") + (active ? " active" : ""), type: "button",
+      title: id ? BY_ID[id].name + " (click to clear)" : "Ban slot", "aria-label": id ? "Banned: " + BY_ID[id].name : "Empty ban slot",
+      onclick: () => { if (id) clearSlot("ban", i); else { setTarget({ kind: "ban", i }); render(); } } });
+    b.append(id ? icon(id) : document.createTextNode("+"));
+    return b;
+  }));
+
+  const t = S.target;
+  const what = t.kind === "ban" ? "a ban" : t.kind === "ally" ? `your team's ${ROLE_LABEL[t.i]}${t.i === S.role ? " (you)" : ""}`
+    : t.kind === "enemy" ? `the enemy ${ROLE_LABEL[t.i]}` : t.kind === "enemyAuto" ? "an enemy pick (role guessed)" : "your champion pool (click to add or remove)";
+  $("target").replaceChildren("Clicking a champion sets ", el("b", { text: what }), ".");
+  $("editPool").textContent = t.kind === "pool" ? "Done" : "Edit my pool";
+  $("poolCount").textContent = S.pool.length;
+  $("usePool").checked = S.usePool;
+
+  seg($("filter"), [[-1, "All"]].concat(ROLE_LABEL.map((l, i) => [i, l])), S.filter, v => { S.filter = v; render(); });
+  const used = taken(), q = S.search.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const list = META.champions.filter(c =>
+    (S.filter < 0 || c.roles[S.filter] >= 0.08) &&
+    (!q || c.name.toLowerCase().replace(/[^a-z0-9]/g, "").includes(q) || c.key.toLowerCase().includes(q)));
+  $("grid").replaceChildren(...list.map(c => {
+    const off = used.has(c.id) && t.kind !== "pool";
+    return el("button", { class: "champ" + (off ? " off" : "") + (S.pool.includes(c.id) && t.kind === "pool" ? " inpool" : ""),
+      type: "button", title: c.name, onclick: () => place(c.id) }, icon(c.id), el("span", { text: c.name }));
+  }));
+  renderPlayer();
+  renderAdvice();
+}
+function renderPlayer() {
+  const ok = META.player_lookup;
+  $("lookup").hidden = !ok;
+  if (!ok) { $("playerInfo").textContent = "Add RIOT_API_KEY to .env and restart to rank picks with your own record."; return; }
+  $("unload").hidden = !S.player;
+  const info = $("playerInfo");
+  if (!S.player) { info.textContent = "Optional: ranks picks using your recent ranked games on each champion."; return; }
+  const p = S.player;
+  info.replaceChildren(el("div", { class: "who", text: p.name }),
+    el("div", { text: p.games ? `${p.games} ranked games in the last month, ${p.wins} won` : "No ranked solo games in the last month - picks are ranked as for an anonymous player." }),
+    el("div", { class: "chips" }, ...p.champions.slice(0, 8).map(c =>
+      el("span", { class: "chip", title: BY_ID[c.id] ? BY_ID[c.id].name : "" }, icon(c.id, true), `${c.wins}–${c.games - c.wins}`))));
+  if (p.champions.length) info.append(el("button", { class: "btn", type: "button", style: "margin-top:8px", text: "Use these as my pool",
+    onclick: () => { S.pool = p.champions.map(c => c.id); S.usePool = true; persist(); render(); refresh(); } }));
+}
+function champCell(id, name) { return el("td", {}, el("span", { class: "cell" }, icon(id, true), name)); }
+function renderAdvice() {
+  const a = last;
+  if (!a) return;
+  const w = a.state.win;
+  $("win").textContent = pct(w);
+  $("win").style.color = w >= 0.5 ? "var(--good)" : "var(--bad)";
+  const open = 10 - S.ally.filter(Boolean).length - S.enemy.length;
+  $("winSub").textContent = (a.state.complete ? "your team's win chance with this draft" :
+    `your team's expected win chance, with the ${open} open pick${open === 1 ? "" : "s"} filled the way Diamond+ players pick`) +
+    ` (± ${(100 * a.state.spread).toFixed(1)})` +
+    (a.personal ? (a.state.personal ? ", counting your record on your pick" : ", for an anonymous player in your slot until you pick") : "");
+  $("winBar").style.width = pct(w);
+
+  const personal = a.personal;
+  $("pickTitle").textContent = `Best picks for ${ROLE_LABEL[S.role]}` + (personal ? " — ranked for you" : "");
+  const head = ["Champion", ["Win %", "Expected win chance with this pick"]];
+  if (personal) head.push(["Draft only", "The same pick by an anonymous player"], ["You", "Your wins–losses on it in the last month"]);
+  head.push(["vs field", "Compared with the average pick in this role"], ["±", "Disagreement between the models; smaller gaps are noise"], ["Worst enemy reply", "The enemy pick that would hurt this most"]);
+  $("pickHead").replaceChildren(el("tr", {}, ...head.map(h => el("th", { text: Array.isArray(h) ? h[0] : h, title: Array.isArray(h) ? h[1] : null, class: h[0] === "Worst enemy reply" ? "reply" : null }))));
+  $("picks").replaceChildren(...a.picks.map(o => {
+    const tr = el("tr", { class: o.champion_id === a.current ? "cur" : "", title: `Pick ${o.champion}`, onclick: () => { setTarget({ kind: "ally", i: S.role }); place(o.champion_id); } },
+      champCell(o.champion_id, o.champion), el("td", { text: pct(o.win) }));
+    if (personal) tr.append(el("td", { class: "dim", text: pct(o.draft_win) }), el("td", { class: o.my_games ? "" : "dim", text: o.my_games ? `${o.my_wins}–${o.my_games - o.my_wins}` : "new" }));
+    tr.append(el("td", { class: o.vs_field >= 0 ? "pos" : "neg", text: signed(o.vs_field) }), el("td", { class: "dim", text: (100 * o.spread).toFixed(1) }),
+      el("td", { class: "reply", text: o.counter ? `${o.counter} → ${pct(o.win_if_countered)}` : "" }));
+    return tr;
+  }));
+  $("pickNote").textContent = a.picks.length ? (S.usePool && S.pool.length ? "Showing only your pool. " : "") + "Click a row to lock it into your slot."
+    + (personal ? " Ranked with your last month of ranked games: champions you have not played recently (“new”) lose a few points, as they do in real games – at this level a player on a champion they have not touched in a month wins about 47%, one with 20+ recent games on it about 52%." : "") : "No candidates.";
+
+  $("banRecs").style.opacity = a.bansStale ? 0.45 : 1;
+  $("banRecs").replaceChildren(...a.bans.map(o => el("tr", { title: `Ban ${o.champion}`, onclick: () => {
+      const i = S.bans.findIndex(c => !c); if (i < 0) { flash("All ten ban slots are filled"); return; }
+      setTarget({ kind: "ban", i }); place(o.champion_id); } },
+    champCell(o.champion_id, o.champion), el("td", { text: pct(o.enemy_pick_chance) }), el("td", { text: pct(o.win_if_enemy_has) }),
+    el("td", { class: (S.sort === "net" ? o.net : o.gain) >= 0 ? "pos" : "neg", text: signed(S.sort === "net" ? o.net : o.gain, 2) }), el("td", { class: "dim", text: pct(o.ban_rate, 0) }))));
+  $("banNote").textContent = a.bans.length ? "Gain = chance the enemy picks it × how much it hurts you when they do. Put your intended pick in your slot to get bans that protect it." : "The enemy team is complete - nothing left to ban.";
+}
+
+// ---- server ----------------------------------------------------------------------------
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({ error: "bad response from server" }));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function refresh() { clearTimeout(timer); timer = setTimeout(advise, 120); }
+async function advise() {
+  const mine = ++pending;
+  const ally = {}; S.ally.forEach((c, i) => { if (c) ally[i] = c; });
+  const body = { side: S.side, role: S.role, ally, enemy: S.enemy, bans: S.bans.filter(Boolean), sort: S.sort,
+    pool: S.usePool && S.pool.length ? S.pool : null, player: S.player ? { riot_id: S.riotId, platform: S.platform } : null };
+  // picks first (the fast part), bans as a second request so the table above never waits for them
+  try {
+    const picks = await post("/api/advise", { ...body, want: "picks" });
+    if (mine !== pending) return;
+    last = { ...picks, bans: last ? last.bans : [], bansStale: true }; $("err").textContent = ""; render();
+    const bans = await post("/api/advise", { ...body, want: "bans" });
+    if (mine !== pending) return;
+    last = { ...last, bans: bans.bans, bansStale: false }; render();
+  } catch (e) { if (mine === pending) $("err").textContent = e.message; }
+}
+async function loadPlayer() {
+  S.riotId = $("riotId").value.trim(); S.platform = $("platform").value; persist();
+  if (!S.riotId.includes("#")) { $("playerErr").textContent = "Enter your Riot ID as Name#TAG."; return; }
+  $("playerErr").textContent = ""; $("load").disabled = true; $("load").textContent = "Loading… (up to a minute the first time)";
+  try { S.player = await post("/api/player", { riot_id: S.riotId, platform: S.platform }); }
+  catch (e) { $("playerErr").textContent = e.message; S.player = null; }
+  $("load").disabled = false; $("load").textContent = "Load my games";
+  render(); refresh();
+}
+
+async function start() {
+  try { META = await (await fetch("/api/meta")).json(); }
+  catch (e) { $("winSub").textContent = "Could not reach the server."; return; }
+  META.champions.forEach(c => { BY_ID[c.id] = c; });
+  S.pool = S.pool.filter(id => BY_ID[id]);
+  $("meta").textContent = `Model: patch ${META.patches.join(", ")}` + (META.matches ? ` · ${Math.round(META.matches / 1000)}k games` : "") + (META.trained_at ? ` · trained ${META.trained_at.slice(0, 10)}` : "");
+  $("platform").replaceChildren(...META.platforms.map(p => el("option", { value: p, text: p.toUpperCase(), selected: p === S.platform ? "" : null })));
+  $("riotId").value = S.riotId;
+  $("search").addEventListener("input", e => { S.search = e.target.value; render(); $("search").focus(); });
+  $("search").addEventListener("keydown", e => { if (e.key === "Enter") { const first = $("grid").querySelector(".champ:not(.off)"); if (first) { first.click(); S.search = ""; $("search").value = ""; render(); $("search").focus(); } } });
+  $("reset").addEventListener("click", () => { S.ally = [0, 0, 0, 0, 0]; S.enemy = []; S.bans = Array(10).fill(0); setTarget({ kind: "ban", i: 0 }); last = null; render(); refresh(); });
+  $("enemyAuto").addEventListener("click", () => { setTarget({ kind: "enemyAuto" }); render(); });
+  $("editPool").addEventListener("click", () => { setTarget(S.target.kind === "pool" ? { kind: "ally", i: S.role } : { kind: "pool" }); render(); });
+  $("usePool").addEventListener("change", e => { S.usePool = e.target.checked; persist(); refresh(); });
+  $("load").addEventListener("click", loadPlayer);
+  $("riotId").addEventListener("keydown", e => { if (e.key === "Enter") loadPlayer(); });
+  $("unload").addEventListener("click", () => { S.player = null; render(); refresh(); });
+  render(); refresh();
+}
+start();
+</script>
+</body>
+</html>

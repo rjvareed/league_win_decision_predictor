@@ -122,6 +122,48 @@ def test_pipeline_learns_real_structure(trained):
     # both patches were used, so every member went through the fine-tuning stage
     assert summary["patches"] == ["99.2", "99.1"] and len(summary["members"]) == 2
     assert summary["config"]["n_player_feats"] == len(PLAYER_FEATURES)
+    # knowing a single player (what the champion-select assistant has) sits in between
+    solo = m["transformer ensemble, draft + one known player"]["log_loss"]
+    assert full < solo < draft
+
+
+def test_checkpoint_carries_what_the_assistant_needs(trained):
+    ckpt = torch.load(trained[2], map_location="cpu", weights_only=True)
+    n = len(ckpt["champion_ids"])
+    assert ckpt["calibration_solo"]["scale"] > 0 and ckpt["calibration_players"]["scale"] > 0
+    assert ckpt["ban_games"] == ckpt["n_matches"]["train"]         # every synthetic game has bans
+    bans = np.array(ckpt["champion_ban_games"])
+    assert bans.shape == (n,) and bans.sum() == 10 * ckpt["ban_games"]
+    means = np.array(ckpt["result_means"])                           # [loser, winner] x ADJUSTED
+    assert means.shape[0] == 2 and (means[1, 0] > means[0, 0])       # winners out-earn losers
+    assert ckpt["hyperparameters"]["refit"] and ckpt["hyperparameters"]["player_partial"] > 0
+
+
+def test_refit_uses_validation_games_and_fixed_epochs(trained, monkeypatch):
+    """The refit trains on training + validation rows for exactly the epochs found before."""
+    import lolwp.train as T
+    args = T.build_parser().parse_args([
+        "--db", str(trained[0]), "--champions", str(trained[1]), "--max-patches", "2",
+        "--device", "cpu", "--epochs", "3", "--finetune-epochs", "2"])
+    hp = T.resolve_hp(args)
+    bundle = T.prepare(args, log=lambda *_: None)
+    calls = []
+    real_fit = T.fit
+
+    def spy(model, b, rows, val, hp, **kw):
+        calls.append((len(rows), kw.get("stop_after")))
+        return real_fit(model, b, rows[:2048], val, {**hp, "batch_size": 1024}, **kw)
+
+    monkeypatch.setattr(T, "fit", spy)
+    model = T.refit_member(bundle, hp, 0, {"pretrain_epoch": 2, "finetune_epoch": 1},
+                           log=lambda *_: None)
+    newest = int((bundle.data.patch[np.concatenate([bundle.tr, bundle.va])] == "99.2").sum())
+    assert calls == [(len(bundle.tr) + len(bundle.va), 2), (newest, 1)]
+    assert torch.isfinite(T.predict_logits(model, bundle, bundle.rows(bundle.va[:64]))).all()
+    # one known player per game: the same player on every call, and never more than one
+    solo = T.predict_logits(model, bundle, bundle.rows(bundle.va[:64]), solo=True)
+    assert torch.equal(solo, T.predict_logits(model, bundle, bundle.rows(bundle.va[:64]), solo=True))
+    assert not torch.allclose(solo, T.predict_logits(model, bundle, bundle.rows(bundle.va[:64])))
 
 
 def test_predictor(trained):
